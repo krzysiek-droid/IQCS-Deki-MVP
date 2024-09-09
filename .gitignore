@@ -17,7 +17,9 @@ config/*.local
 *.json
 *.txt
 *.ui
-
+*.pyc
+*.png
+*.qrc
 # Ignorowanie folderu node_modules (typowe dla projektów JavaScript)
 App_icons/
 DekiResources/
@@ -30,3 +32,4 @@ Pictures/
 .DS_Store
 Thumbs.db
 tests.py
+resources_rc.py
