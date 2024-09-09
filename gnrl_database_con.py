@@ -1,9 +1,8 @@
-
 import sys
 import pandas as pd
 import mariadb
 
-with open(r"D:\CondaPy - Projects\PyGUIs\DekiApp_pyqt5\DekiResources\database_con.txt",
+with open(r"D:\Python Projects\IQCS - Deki MVP\DekiResources\database_con.txt",
           'r', encoding="UTF-8") as f:
     db_credentials = f.read().split("\n")
     for i in range(len(db_credentials)):
@@ -15,7 +14,6 @@ DATABASE_USER = db_credentials[1]
 DATABASE_PASSWORD = db_credentials[2]
 DATABASE_NAME = db_credentials[3]
 PORT = int(db_credentials[4])
-
 
 def validate_text(text):
     tmp_text = text
@@ -409,9 +407,9 @@ class Database:
 
 
 if __name__ == "__main__":
+    print(f"running {__name__}")
     db = Database()
     # db_rows = db.df_from_filteredTable('deki_2022_SubConstructions', 'parent_construction_id', 1)
     # print(db_rows['id'].tolist())
     # for i in db_rows['id'].tolist():
     #     print(i)
-    print(db)
