@@ -1,0 +1,32 @@
+# Ignorowanie plików tymczasowych edytorów
+*~
+*.swp
+
+# Ignorowanie plików logów
+*.log
+
+# Ignorowanie katalogu build i wszystkich jego podkatalogów
+build/
+
+# Ignorowanie plików konfiguracyjnych specyficznych dla użytkownika
+config/*.local
+
+# Ignorowanie plików binarnych
+*.exe
+*.dll
+*.json
+*.txt
+*.ui
+
+# Ignorowanie folderu node_modules (typowe dla projektów JavaScript)
+App_icons/
+DekiResources/
+Icons/
+Pictures/
+.idea/
+
+
+# Ignorowanie plików specyficznych dla systemu operacyjnego
+.DS_Store
+Thumbs.db
+tests.py
