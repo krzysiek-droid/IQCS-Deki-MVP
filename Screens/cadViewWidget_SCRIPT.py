@@ -2,6 +2,15 @@
 import logging
 
 from OCC.Core.AIS import AIS_Shape
+from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_Transform
+from OCC.Core.STEPCAFControl import STEPCAFControl_Reader
+from OCC.Core.TDF import TDF_LabelSequence, TDF_Label, TDF_ChildIterator, TDF_ChildIDIterator
+from OCC.Core.TDocStd import TDocStd_Document
+from OCC.Core.TopAbs import TopAbs_ShapeEnum
+from OCC.Core.TopLoc import TopLoc_Location
+from OCC.Core.XCAFDoc import XCAFDoc_DocumentTool
+from OCC.Core._IFSelect import IFSelect_ItemsByEntity
+from OCC.Display.wxDisplay import wxViewer3d
 
 from OCC.Core._Quantity import Quantity_TOC_RGB
 from PyQt5.QtGui import QColor
@@ -10,16 +19,16 @@ import resources_rc
 
 # Reads STEP files, checks them and translates their contents into Open CASCADE models
 from OCC.Display.backend import load_backend
-from OCC.Extend.DataExchange import read_step_file_with_names_colors
+from OCC.Extend.DataExchange import read_step_file_with_names_colors, read_step_file
 
 import sys
 import ctypes
 from OCC.Core.STEPControl import STEPControl_Reader
-from OCC.Core.TopoDS import TopoDS_Compound, TopoDS_Solid, TopoDS_Iterator
+from OCC.Core.TopoDS import TopoDS_Compound, TopoDS_Solid, TopoDS_Iterator, TopoDS_Shape
 
 from OCC.Core.IFSelect import IFSelect_RetDone
 from PyQt5.QtWidgets import QApplication, QVBoxLayout, QWidget, QMainWindow, QTreeWidget, QTreeWidgetItem, QHBoxLayout, \
-    QSplitter
+    QSplitter, QSizePolicy
 from OCC.Core.Quantity import Quantity_Color as qc, Quantity_Color
 
 log = logging.getLogger(__name__)
@@ -138,21 +147,33 @@ class CadViewer(QWidget):
             if isinstance(key, TopoDS_Compound):
                 print(shapes[key])
 
-    def read_step_file_with_names_colors(self, filepath):
-        # Placeholder function, you need to implement the logic for reading STEP file with names and colors
-        shapes = {}
-        # Example logic to populate shapes with TopoDS_Compound and their properties
-        # shapes[some_TopoDS_Compound] = some_property
-        return shapes
-
 
 class AdvancedCadViewer(QWidget):
     opengl32 = ctypes.windll.opengl32
     wglDeleteContext = opengl32.wglDeleteContext
 
+    shape_enum_dict = {
+        'TopAbs_COMPOUND': 0,
+        'TopAbs_COMPSOLID': 1,
+        'TopAbs_SOLID': 2,
+        'TopAbs_SHELL': 3,
+        'TopAbs_FACE': 4,
+        'TopAbs_WIRE': 5,
+        'TopAbs_EDGE': 6,
+        'TopAbs_VERTEX': 7,
+        'TopAbs_SHAPE': 8}
+
+    def translate_shape(self, value):
+        if value is str:
+            return self.shape_enum_dict[value]
+        else:
+            for stype, ival in self.shape_enum_dict.items():  # Get name of shape type
+                if ival == value:
+                    return stype
+
     def __init__(self, step_filepath: str):
         super(AdvancedCadViewer, self).__init__()
-        self.shape_tool = None
+        self.shape_tool: XCAFDoc_DocumentTool.ShapeTool = None
         self.shape_labels = None
         self.shapes = []
         self.display = None
@@ -163,7 +184,6 @@ class AdvancedCadViewer(QWidget):
         # Initialize qtDisplay and the canvas
         self.cadViewerCanvas = qtDisplay.qtViewer3d()
         self.display = self.cadViewerCanvas._display
-        self.cadViewerCanvas.resize(200, 200)
 
         # Create the QTreeWidget to display component hierarchy
         self.component_tree = QTreeWidget()
@@ -178,8 +198,11 @@ class AdvancedCadViewer(QWidget):
 
         # Read and display the STEP file
         self.read_stepFile(self.filepath)
+        #self.populate_component_tree()
 
         self.component_tree.itemDoubleClicked.connect(self.on_treeItem_clicked)
+        for shape in self.shapes[1:]:
+            self.display_shape(shape[1])
 
     def closeEvent(self, QCloseEvent):
         super(AdvancedCadViewer, self).closeEvent(QCloseEvent)
@@ -187,48 +210,88 @@ class AdvancedCadViewer(QWidget):
         QCloseEvent.accept()
 
     def read_stepFile(self, step_filepath):
-        # app = XCAFApp_Application.GetApplication()
-        # doc = TDocStd_Document("MDTV-XCAF")
-        # app.NewDocument("MDTV-XCAF", doc)
+        doc = TDocStd_Document("pythonocc-doc-step-import")
+        self.shape_tool = XCAFDoc_DocumentTool.ShapeTool(doc.Main())
+        color_tool = XCAFDoc_DocumentTool.ColorTool(doc.Main())
+        print(f"cadViewWidget_SCRIPT | AdvancedCadViewer, func: read_step: Reading STEP file: {step_filepath}")
+        self.step_reader = STEPCAFControl_Reader()
+        #self.step_reader.SetColorMode(True)
+        #self.step_reader.SetLayerMode(True)
+        self.step_reader.SetNameMode(True)
+        #self.step_reader.SetMatMode(True)
+        #self.step_reader.SetGDTMode(True)
 
-        print(f"cadViewWidget_SCRIPT | CadViewer, func: read_step: Reading STEP file: {step_filepath}")
-        step_reader = STEPControl_Reader()
-        status = step_reader.ReadFile(step_filepath)
-
+        status = self.step_reader.ReadFile(step_filepath)
         if status == IFSelect_RetDone:  # RetDone : normal execution with a result
-            step_reader.TransferRoot()
-            # Populate the component tree
-            self.populate_component_tree()
-            # shape = step_reader.Shape()
-            # self.shape: AIS_Shape = AIS_Shape(shape)
-            # self.shape_tool = XCAFDoc_DocumentTool.ShapeTool(doc.Main())
-            # self.shape_labels = TDF_LabelSequence()
-            # self.shape_tool.GetFreeShapes(self.shape_labels)
+            self.step_reader.Transfer(doc)
+
+            labels = TDF_LabelSequence()
+            self.shape_tool.GetFreeShapes(labels)
+            for i in range(labels.Length()):
+                root_shape_label: TDF_Label = labels.Value(i + 1)    # Typically there will be only 1 shape
+                self.add_shape(root_shape_label)
+                self.get_subShapes(root_shape_label, self.shapes[-1][-1])
             print("cadViewWidget_SCRIPT | CadViewer, func: read_step: STEP file read successfully.")
         else:
             print("cadViewWidget_SCRIPT | CadViewer, func: read_step: Error: can't read file.")
             sys.exit(0)
 
-    # def start_display(self):
-    #     self.cadViewerCanvas.InitDriver()
-    #     self.display.set_bg_gradient_color(qc(1, 1, 1, 0), qc(1, 1, 1, 0))
-    #     self.display.Context.Display(self.shape, True)
-    #     self.display.FitAll()
+    def get_subShapes(self, shape_label, TreeItem_parent):
+        subCompounds_labels = TDF_LabelSequence()
+        self.shape_tool.GetComponents(shape_label, subCompounds_labels)
+        for i in range(subCompounds_labels.Length()):   # Iterate over the shapes found in passed shape_label
+            subCompound_label = subCompounds_labels.Value(i + 1)    # take the TDF_Label of an object in list
+            if self.shape_tool.IsReference(subCompound_label):      # filter to reject all potential names not related to shapes
+                topo_shape = self.add_shape(subCompound_label, TreeItem_parent) # add shape to class memory
+                if topo_shape.ShapeType() == self.shape_enum_dict['TopAbs_COMPOUND'] and topo_shape.NbChildren() > 1:   # if shape is Assembly go through its subassmblies
+                    parent_treeItem = self.shapes[-1][-1]
+                    iterator = TopoDS_Iterator(topo_shape)
+                    print(f"shape -> {subCompound_label.GetLabelName()} - {subCompound_label.NbChildren()}")
+                    while iterator.More():
+                        child_topoShape = iterator.Value()
+                        child_label = self.shape_tool.FindShape(child_topoShape)
+                        print(f"is null? {child_label.IsNull()}")
+                        topo_shape = self.add_shape(child_label, parent_treeItem)
+                        if child_topoShape.ShapeType() is self.shape_enum_dict['TopAbs_COMPOUND']:
+                            self.get_subShapes(child_label, self.shapes[-1][-1])
+                        iterator.Next()
+        return 1
 
-    def display_shape(self, shape):
+    def add_shape(self, shapeLabel: TDF_Label, itemParent=None):
+        if not shapeLabel.IsNull():
+            if itemParent is None:
+                component_item = QTreeWidgetItem(self.component_tree)
+            else:
+                component_item = QTreeWidgetItem(itemParent)
+            try:
+                shape_name = shapeLabel.GetLabelName()
+                shape = self.shape_tool.GetShape(shapeLabel)
+                shape_location = self.shape_tool.GetLocation(shapeLabel)
+                shape_type = self.translate_shape(shape.ShapeType())
+                component_item.setText(0, shape_name)
+                component_item.setText(1, shape_type)
+                new_shape = (shape_name, AIS_Shape(shape), shape_location, shape_type, component_item)
+                self.shapes.append(new_shape)
+                print(f"adViewWidget_SCRIPT | AdvancedCadViewer, func: add_shape: New Shape added - {new_shape}")
+                return shape
+            except Exception as exc:
+                print(f"Couldnt add new item -> {shapeLabel.HasAttribute()}")
+
+    def display_shape(self, ais_shape):
         """Convert TopoDS_Shape to AIS_Shape and display it."""
-        ais_shape = AIS_Shape(shape)
         self.display.Context.Display(ais_shape, True)
         self.display.FitAll()
         return ais_shape
 
-
     def populate_component_tree(self):
         # Pobierz listę komponentów z pliku STEP
         shapes = read_step_file_with_names_colors(self.filepath)
+        print(shapes)
+
         component_item = QTreeWidgetItem()
         for shape in list(shapes.items()):
             ais_shape = self.display_shape(shape[0])
+            print(f"TopoDS shape -> {type(shape[0])} - AIS shape -> {ais_shape.Type()}")
             if isinstance(shape[0], TopoDS_Compound):
                 component_item = QTreeWidgetItem(self.component_tree)
                 component_item.setText(0, str(shape[1][0]))
@@ -255,7 +318,7 @@ class AdvancedCadViewer(QWidget):
         # Find the 3D object of which name has been selected on TreeWidget
         for shape_info in self.shapes:
             clicked_object = shape_info[1]
-            if item == shape_info[3]:
+            if item == shape_info[-1]:
                 self.set_shape_color(clicked_object, QColor(0, 255, 00))
             else:
                 clicked_object.UnsetColor()
@@ -270,7 +333,6 @@ class AdvancedCadViewer(QWidget):
         Returns:
             list: A list containing all QTreeWidgetItem objects in the tree.
         """
-
         def recursive_get_items(item):
             items = []
             child_count = item.childCount()
@@ -300,8 +362,9 @@ class AdvancedCadViewer(QWidget):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     mw = QMainWindow()
+    #nwg = fr"C:\Users\Młody\Desktop\[Srv] Deki\Projekty\NWG\Sciana 58We\58WE-POM_031100-2-00#Sciana_prawa.stp"
     nw = AdvancedCadViewer("../DekiResources/Zbiornik LNG assembly.stp")
-
+    #nw = AdvancedCadViewer(nwg)
 
     # nw.start_display()
     mw.setCentralWidget(nw)
