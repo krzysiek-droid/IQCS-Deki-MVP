@@ -1,18 +1,16 @@
-
 import logging
 
-from OCC.Core.AIS import AIS_Shape
-from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_Transform
+from OCC.Core.AIS import AIS_Shape, AIS_InteractiveContext
+
 from OCC.Core.STEPCAFControl import STEPCAFControl_Reader
-from OCC.Core.TDF import TDF_LabelSequence, TDF_Label, TDF_ChildIterator, TDF_ChildIDIterator
+from OCC.Core.TCollection import TCollection_ExtendedString
+from OCC.Core.TDF import TDF_LabelSequence, TDF_Label, TDF_Attribute, TDF_Data
+from OCC.Core.TDataStd import TDataStd_Name
 from OCC.Core.TDocStd import TDocStd_Document
-from OCC.Core.TopAbs import TopAbs_ShapeEnum
-from OCC.Core.TopLoc import TopLoc_Location
 from OCC.Core.XCAFDoc import XCAFDoc_DocumentTool
-from OCC.Core._IFSelect import IFSelect_ItemsByEntity
-from OCC.Display.wxDisplay import wxViewer3d
 
 from OCC.Core._Quantity import Quantity_TOC_RGB
+from PyQt5.QtCore import QEvent
 from PyQt5.QtGui import QColor
 
 import resources_rc
@@ -36,9 +34,10 @@ log = logging.getLogger(__name__)
 used_backend = load_backend()
 log.info("GUI backend set to: {0}".format(used_backend))
 print("GUI backend set to: {0}".format(used_backend))
+
 import OCC.Display.qtDisplay as qtDisplay
 
-# TODO: add buttons for rotation of CAD Model etc.
+
 class CadViewerLayout(QVBoxLayout):
     def __init__(self, step_filepath: str):
         super(CadViewerLayout, self).__init__()
@@ -148,6 +147,30 @@ class CadViewer(QWidget):
                 print(shapes[key])
 
 
+class CustomShapeAIS(AIS_Shape):
+    def __init__(self, name, topo_shape, location, topo_type, treeItem, parent_AIS_shape):
+        super(CustomShapeAIS, self).__init__(topo_shape)
+        self.name = name
+        self.topo_shape = topo_shape
+        self.location = location
+        self.topo_type = topo_type
+        self.treeItem = treeItem
+        self.parent_shape = parent_AIS_shape
+        self.childrenShapes = []
+
+    def __repr__(self):
+        return f"CustomShapeAIS(name={self.name})"
+
+    def add_ChildShape(self, shape):
+        self.childrenShapes.append(shape)
+
+    def isCompound(self):
+        if self.topo_type == 'TopAbs_COMPOUND' or self.topo_type == 0:
+            return True
+        else:
+            return False
+
+
 class AdvancedCadViewer(QWidget):
     opengl32 = ctypes.windll.opengl32
     wglDeleteContext = opengl32.wglDeleteContext
@@ -173,9 +196,13 @@ class AdvancedCadViewer(QWidget):
 
     def __init__(self, step_filepath: str):
         super(AdvancedCadViewer, self).__init__()
+        self.previously_highlighted = None
+        self.current_hovered_item = None
+        self.tree_items = []
         self.shape_tool: XCAFDoc_DocumentTool.ShapeTool = None
         self.shape_labels = None
         self.shapes = []
+        self.shapes_dict = dict()
         self.display = None
         self.shape = None
         self.filepath = step_filepath
@@ -188,6 +215,7 @@ class AdvancedCadViewer(QWidget):
         # Create the QTreeWidget to display component hierarchy
         self.component_tree = QTreeWidget()
         self.component_tree.setHeaderLabels(["Component", "Type"])
+        self.component_tree.setMouseTracking(True)
         self.splitter.addWidget(self.component_tree)
 
         # Add canvas to the layout
@@ -198,11 +226,14 @@ class AdvancedCadViewer(QWidget):
 
         # Read and display the STEP file
         self.read_stepFile(self.filepath)
-        #self.populate_component_tree()
+        # self.populate_component_tree()
 
         self.component_tree.itemDoubleClicked.connect(self.on_treeItem_clicked)
-        for shape in self.shapes[1:]:
-            self.display_shape(shape[1])
+        self.component_tree.itemEntered.connect(self.on_treeItem_enter)
+
+        for shape in self.shapes:
+            if len(shape.childrenShapes) == 0:
+                self.display_shape(shape)
 
     def closeEvent(self, QCloseEvent):
         super(AdvancedCadViewer, self).closeEvent(QCloseEvent)
@@ -215,95 +246,86 @@ class AdvancedCadViewer(QWidget):
         color_tool = XCAFDoc_DocumentTool.ColorTool(doc.Main())
         print(f"cadViewWidget_SCRIPT | AdvancedCadViewer, func: read_step: Reading STEP file: {step_filepath}")
         self.step_reader = STEPCAFControl_Reader()
-        #self.step_reader.SetColorMode(True)
-        #self.step_reader.SetLayerMode(True)
         self.step_reader.SetNameMode(True)
-        #self.step_reader.SetMatMode(True)
-        #self.step_reader.SetGDTMode(True)
-
         status = self.step_reader.ReadFile(step_filepath)
         if status == IFSelect_RetDone:  # RetDone : normal execution with a result
             self.step_reader.Transfer(doc)
-
             labels = TDF_LabelSequence()
             self.shape_tool.GetFreeShapes(labels)
             for i in range(labels.Length()):
-                root_shape_label: TDF_Label = labels.Value(i + 1)    # Typically there will be only 1 shape
-                self.add_shape(root_shape_label)
-                self.get_subShapes(root_shape_label, self.shapes[-1][-1])
+                root_shape_label: TDF_Label = labels.Value(i + 1)  # Typically there will be only 1 shape
+                root_topo_shape = self.shape_tool.GetShape(root_shape_label)
+                self.add_topoShape(root_topo_shape)
+                self.get_subComponents(root_topo_shape, self.shapes[-1])
             print("cadViewWidget_SCRIPT | CadViewer, func: read_step: STEP file read successfully.")
         else:
             print("cadViewWidget_SCRIPT | CadViewer, func: read_step: Error: can't read file.")
             sys.exit(0)
 
-    def get_subShapes(self, shape_label, TreeItem_parent):
-        subCompounds_labels = TDF_LabelSequence()
-        self.shape_tool.GetComponents(shape_label, subCompounds_labels)
-        for i in range(subCompounds_labels.Length()):   # Iterate over the shapes found in passed shape_label
-            subCompound_label = subCompounds_labels.Value(i + 1)    # take the TDF_Label of an object in list
-            if self.shape_tool.IsReference(subCompound_label):      # filter to reject all potential names not related to shapes
-                topo_shape = self.add_shape(subCompound_label, TreeItem_parent) # add shape to class memory
-                if topo_shape.ShapeType() == self.shape_enum_dict['TopAbs_COMPOUND'] and topo_shape.NbChildren() > 1:   # if shape is Assembly go through its subassmblies
-                    parent_treeItem = self.shapes[-1][-1]
-                    iterator = TopoDS_Iterator(topo_shape)
-                    print(f"shape -> {subCompound_label.GetLabelName()} - {subCompound_label.NbChildren()}")
-                    while iterator.More():
-                        child_topoShape = iterator.Value()
-                        child_label = self.shape_tool.FindShape(child_topoShape)
-                        print(f"is null? {child_label.IsNull()}")
-                        topo_shape = self.add_shape(child_label, parent_treeItem)
-                        if child_topoShape.ShapeType() is self.shape_enum_dict['TopAbs_COMPOUND']:
-                            self.get_subShapes(child_label, self.shapes[-1][-1])
-                        iterator.Next()
-        return 1
+    def get_subComponents(self, shape_topoDS, root_Shape):
+        """
+        Recursively iterates over the subcomponents of the provided TopoDS_Shape
+        and adds them to a tree structure.
+        """
+        # Initialize the iterator for the given shape
+        iterator = TopoDS_Iterator(shape_topoDS)
+        while iterator.More():
+            child_shape = iterator.Value()
+            self.add_topoShape(child_shape, root_Shape)
+            # Check if the child shape is a compound (or any type that could contain sub-shapes)
+            if child_shape.ShapeType() == self.shape_enum_dict['TopAbs_COMPOUND']:
+                parent_Shape = self.shapes[-1]  # Get the latest added item for parent-child relation
+                # Recursive call to handle nested subcomponents
+                self.get_subComponents(child_shape, parent_Shape)
+            # Move to the next child shape
+            iterator.Next()
 
-    def add_shape(self, shapeLabel: TDF_Label, itemParent=None):
-        if not shapeLabel.IsNull():
-            if itemParent is None:
-                component_item = QTreeWidgetItem(self.component_tree)
-            else:
-                component_item = QTreeWidgetItem(itemParent)
-            try:
-                shape_name = shapeLabel.GetLabelName()
-                shape = self.shape_tool.GetShape(shapeLabel)
-                shape_location = self.shape_tool.GetLocation(shapeLabel)
-                shape_type = self.translate_shape(shape.ShapeType())
-                component_item.setText(0, shape_name)
-                component_item.setText(1, shape_type)
-                new_shape = (shape_name, AIS_Shape(shape), shape_location, shape_type, component_item)
-                self.shapes.append(new_shape)
-                print(f"adViewWidget_SCRIPT | AdvancedCadViewer, func: add_shape: New Shape added - {new_shape}")
-                return shape
-            except Exception as exc:
-                print(f"Couldnt add new item -> {shapeLabel.HasAttribute()}")
+    def add_topoShape(self, topo_shape, parent_Shape=None):
 
-    def display_shape(self, ais_shape):
+        if topo_shape.ShapeType() is self.shape_enum_dict['TopAbs_COMPOUND'] and topo_shape.NbChildren() < 1:
+            print(f'Empty Assembly found. -> {self.shape_tool.FindShape(topo_shape).GetLabelName()}')
+            return 0  # skip empty assemblies
+
+        if parent_Shape is None:    # Means that topo_shape is root
+            component_item = QTreeWidgetItem(self.component_tree)
+        else:
+            component_item = QTreeWidgetItem(parent_Shape.treeItem)
+
+
+        shape_label: TDF_Label = self.shape_tool.FindShape(topo_shape)  # Get shape label
+        if shape_label.IsNull():    # Can't find a label corresponding to shape - we need to add that one to shape_tool
+            new_label = self.shape_tool.AddShape(topo_shape)    # Add shape to shape_tool, generating its label
+            # New label for the shape
+            label_name = f"{parent_Shape.name}_{len(self.shapes) - self.shapes.index(parent_Shape)}"
+            # Change label corresponding to added shape
+            self.change_label_name(new_label, label_name)
+            shape_label = new_label
+
+        shape_type = self.translate_shape(topo_shape.ShapeType())
+        shape_name = shape_label.GetLabelName()
+        shape_location = self.shape_tool.GetLocation(shape_label)
+        component_item.setText(0, shape_name)
+        component_item.setText(1, shape_type)
+        new_shape = CustomShapeAIS(shape_name, topo_shape, shape_location, shape_type, component_item,
+                                   parent_Shape)
+        if parent_Shape is not None:
+            parent_Shape.add_ChildShape(new_shape)
+        self.shapes.append(new_shape)
+        print(f"adViewWidget_SCRIPT | AdvancedCadViewer, func: add_topoShape: New Shape added - {new_shape.name}")
+        return topo_shape
+
+    def change_label_name(self, label: TDF_Label, new_name):
+        """Changes the TDF_Label name"""
+        name_id = TDataStd_Name.GetID()
+        if label.IsAttribute(name_id):
+            name_attr = TDataStd_Name.Set(label, new_name)
+            print(f"Utworzono nową nazwę etykiety: {new_name}")
+
+    def display_shape(self, ais_shape: AIS_Shape):
         """Convert TopoDS_Shape to AIS_Shape and display it."""
         self.display.Context.Display(ais_shape, True)
         self.display.FitAll()
         return ais_shape
-
-    def populate_component_tree(self):
-        # Pobierz listę komponentów z pliku STEP
-        shapes = read_step_file_with_names_colors(self.filepath)
-        print(shapes)
-
-        component_item = QTreeWidgetItem()
-        for shape in list(shapes.items()):
-            ais_shape = self.display_shape(shape[0])
-            print(f"TopoDS shape -> {type(shape[0])} - AIS shape -> {ais_shape.Type()}")
-            if isinstance(shape[0], TopoDS_Compound):
-                component_item = QTreeWidgetItem(self.component_tree)
-                component_item.setText(0, str(shape[1][0]))
-                component_item.setText(1, "Assembly")
-                new_shape = (str(shape[1][0]), ais_shape, 'Compound', component_item)
-                self.shapes.append(new_shape)
-            if isinstance(shape[0], TopoDS_Solid):
-                sub_item = QTreeWidgetItem(component_item)
-                sub_item.setText(0, str(shape[1][0]))
-                sub_item.setText(1, "3D Object")
-                new_shape = (str(shape[1][0]), ais_shape, '3D Object', sub_item)
-                self.shapes.append(new_shape)
 
     def on_treeItem_clicked(self, item: QTreeWidgetItem):
         item.setSelected(True)
@@ -316,55 +338,79 @@ class AdvancedCadViewer(QWidget):
                 otherItem.setBackground(0, QColor(255, 255, 255))
 
         # Find the 3D object of which name has been selected on TreeWidget
-        for shape_info in self.shapes:
-            clicked_object = shape_info[1]
-            if item == shape_info[-1]:
-                self.set_shape_color(clicked_object, QColor(0, 255, 00))
+        for shape in self.shapes:
+            if item == shape.treeItem:
+                self.set_shape_color(shape, QColor(0, 255, 00))
             else:
-                clicked_object.UnsetColor()
+                shape.UnsetColor()
 
-    def get_all_tree_items(self):
+    def on_treeItem_enter(self, item: QTreeWidgetItem, column: int):
+
+        if self.previously_highlighted is not None:
+            if type(self.previously_highlighted) is not list:
+                self.display.Context.Unhilight(self.previously_highlighted, True)
+            else:
+                for previosuly_hilighted in self.previously_highlighted:
+                    self.display.Context.Unhilight(previosuly_hilighted, True)
+
+
+        for shape in self.shapes:
+            if item == shape.treeItem and not shape.isCompound():
+                self.display.Context.Hilight(shape, True)
+                self.previously_highlighted = shape
+
+            elif item == shape.treeItem and shape.isCompound():
+                print(f"is compound -> {shape.name} -> {shape.childrenShapes}")
+                self.previously_highlighted = []
+                for child_shape in shape.childrenShapes:
+                    self.display.Context.Hilight(child_shape, True)
+                    self.previously_highlighted.append(child_shape)
+
+    def get_all_tree_items(self, force_update=False):
         """
-        Retrieves all QTreeWidgetItem objects from a QTreeWidget.
-
-        Args:
-            self.tree_widget (QTreeWidget): The QTreeWidget to retrieve items from.
-
-        Returns:
-            list: A list containing all QTreeWidgetItem objects in the tree.
+        Retrieves or updates all QTreeWidgetItem objects from a QTreeWidget.
         """
-        def recursive_get_items(item):
-            items = []
-            child_count = item.childCount()
-            for i in range(child_count):
-                child = item.child(i)
-                items.append(child)
-                items.extend(recursive_get_items(child))
-            return items
-        # Initialize an empty list to store all items
-        all_items = []
-        # Iterate over all top-level items
-        top_level_item_count = self.component_tree.topLevelItemCount()
-        for i in range(top_level_item_count):
-            top_item = self.component_tree.topLevelItem(i)
-            all_items.append(top_item)
-            all_items.extend(recursive_get_items(top_item))
-        return all_items
+        if len(self.tree_items) == 0 and not force_update:
+            def recursive_get_items(item):
+                items = []
+                child_count = item.childCount()
+                for i in range(child_count):
+                    child = item.child(i)
+                    items.append(child)
+                    items.extend(recursive_get_items(child))
+                return items
+
+            # Initialize an empty list to store all items
+            all_items = []
+            # Iterate over all top-level items
+            top_level_item_count = self.component_tree.topLevelItemCount()
+            for i in range(top_level_item_count):
+                top_item = self.component_tree.topLevelItem(i)
+                all_items.append(top_item)
+                all_items.extend(recursive_get_items(top_item))
+
+            self.tree_items = all_items
+            return all_items
+        else:
+            return self.tree_items
 
     def set_shape_color(self, ais_shape: AIS_Shape, color: QColor):
         """Ustawienie koloru dla danego obiektu AIS_Shape."""
         # Konwersja koloru PyQt na kolor Open Cascade
-        occ_color = Quantity_Color(color.red() / 255.0, color.green() / 255.0, color.blue() / 255.0, Quantity_TOC_RGB)
-        ais_shape.SetColor(occ_color)  # Ustawienie koloru
-        self.display.Context.Redisplay(ais_shape, True)
+        if ais_shape.DisplayStatus():
+            occ_color = Quantity_Color(color.red() / 255.0, color.green() / 255.0, color.blue() / 255.0,
+                                       Quantity_TOC_RGB)
+            ais_shape.SetColor(occ_color)  # Ustawienie koloru
+            self.display.Context.Redisplay(ais_shape, True)
 
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     mw = QMainWindow()
-    #nwg = fr"C:\Users\Młody\Desktop\[Srv] Deki\Projekty\NWG\Sciana 58We\58WE-POM_031100-2-00#Sciana_prawa.stp"
-    nw = AdvancedCadViewer("../DekiResources/Zbiornik LNG assembly.stp")
-    #nw = AdvancedCadViewer(nwg)
+    step_sample_path = r"../DekiResources/Zbiornik LNG assembly.stp"
+    # nwg = fr"C:\Users\Młody\Desktop\[Srv] Deki\Projekty\NWG\Sciana 58We\58WE-POM_031100-2-00#Sciana_prawa.stp"
+    nw = AdvancedCadViewer(step_sample_path)
+    # nw = AdvancedCadViewer(nwg)
 
     # nw.start_display()
     mw.setCentralWidget(nw)
