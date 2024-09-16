@@ -83,24 +83,23 @@ class Database:
 
     def replace_row(self, table_name, replaced_row: dict, row_id=None):
         try:
+            self.conn.begin()  # Rozpoczęcie transakcji
             if row_id is None:
                 row_id = int(list(replaced_row.values())[0])
-            # Get the column names for the table
             columns = self.get_columns_names(table_name)
-            # Remove the 'id' column from the list of column names
             columns.remove('id')
-            # Construct the SET clause of the SQL query
             set_clause = ','.join([f'{col}=%s' for col in columns])
-            # Append the row_id to the values list
             values = list(replaced_row.values())[1:]
             values.append(row_id)
-            # Construct the SQL query with a WHERE clause that filters by id
             query = f"UPDATE {table_name} SET {set_clause} WHERE id = %s"
-            # Execute the SQL query
             self.cur.execute(query, values)
-        except ValueError:
-            print(f'Values has to be inserted as a py list (not any other arrays!).')
-        self.conn.commit()
+            self.conn.commit()
+        except ValueError as ve:
+            print(f'Values must be provided as a Python list. Error: {ve}')
+            self.conn.rollback()
+        except mariadb.Error as e:
+            print(f"mariaDB error occurred: {e}")
+            self.conn.rollback()
 
     # returns a pandas DataFrame from given table and columns (as a list of strings)
     # returns all columns if given '*'
@@ -119,19 +118,8 @@ class Database:
 
         qry = f'SELECT {columns_txt} FROM {table_name}'
         self.cur.execute(qry)
-
-        output_list = []
-        minor_list = []
-        for tuple_value in self.cur.fetchall():
-            for value in tuple_value:
-                minor_list.append(value)
-            output_list.append(minor_list)
-            minor_list = []
-
-        df = pd.DataFrame(columns=columns)
-        for record in output_list:
-            series = pd.Series(record, index=columns)
-            df = df.append(series, ignore_index=True)
+        data = self.cur.fetchall()
+        df = pd.DataFrame(data, columns=[desc[0] for desc in self.cur.description])
 
         return df
 
@@ -144,45 +132,38 @@ class Database:
         self.table_into_DF(table_name)
 
     def insertDB_from_csv(self, table_name, csv_path, csv_separator):
-        # table_name = validate_text(table_name)
         df = pd.read_csv(csv_path, sep=csv_separator)
-        if self.is_table(table_name):
-            print(f"Table {table_name} already exist. Inserting data....")
-        else:
+        if not self.is_table(table_name):
             self.create_table(table_name, df.columns.tolist())
-            print(f"Table {table_name} created. Inserting data....")
 
-        for index, row in df.iterrows():
-            text_records = ','.join(map(str, row)).replace(" ", '')
-            self.insert(table_name, text_records)
+        records = [tuple(row) for row in df.to_records(index=False)]
+        placeholders = ','.join(["%s"] * len(df.columns))
+        query = f"INSERT INTO {table_name} VALUES ({placeholders})"
+
+        self.cur.executemany(query, records)
+        self.conn.commit()
 
         self.table_into_DF(table_name)
 
     def delete_records(self, table_name, rowID):  # TODO: order by ID
-        qry = f'DELETE FROM {table_name} WHILE id = %s'
+        qry = f'DELETE FROM {table_name} WHERE id = %s'
         deleted_item = (rowID,)
         self.cur.execute(qry, deleted_item)
         self.conn.commit()
         print(f"Row {rowID} has been deleted from Database.")
 
     def table_into_DF(self, table_name):
-        # self.reconnect()
-        # table_name = validate_text(table_name)
         qry = f'SELECT * FROM {table_name}'
         self.cur.execute(qry)
         records = self.cur.fetchall()
         table_cols = self.get_columns_names(table_name)
-        df = pd.DataFrame(columns=table_cols)
-        for record in records:
-            row_dict = {k: v for k, v in zip(table_cols, record)}
-            x = pd.DataFrame.from_dict([row_dict])
-            df = pd.concat([df, x])
+        df = pd.DataFrame(records, columns=table_cols)
         return df
 
     def get_row(self, table_name: str, col_name: str, row_pos: str):
         # table_name = validate_text(table_name)
-        qry = f'SELECT * FROM {table_name} WHERE {col_name} = {row_pos}'
-        self.cur.execute(qry)
+        qry = f'SELECT * FROM {table_name} WHERE {col_name} = %s'
+        self.cur.execute(qry, (row_pos,))
         row_data = self.cur.fetchall()
         return row_data
 
